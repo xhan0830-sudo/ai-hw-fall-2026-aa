@@ -1,72 +1,56 @@
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 
-def fgsm_attack(model, images, labels, epsilon):
-    """Fast Gradient Sign Method (FGSM)"""
-    images = images.clone().detach().requires_grad_(True)
-    outputs = model(images)
-    loss = nn.CrossEntropyLoss()(outputs, labels)
-    
-    model.zero_grad()
-    loss.backward()
-    
-    # Add perturbation gradient sign
-    adv_images = images + epsilon * images.grad.sign()
-    adv_images = torch.clamp(adv_images, 0, 1)
-    return adv_images.detach()
+def fgsm_attack(image, epsilon, data_grad):
+    # Collect the element-wise sign of the data gradient
+    sign_data_grad = data_grad.sign()
+    # Create the perturbed image by adjusting each pixel of the input image
+    perturbed_image = image + epsilon * sign_data_grad
+    # Adding clipping to maintain range (before normalization)
+    # Since MNIST is normalized, we might just clip it to normalized bounds or leave it
+    return perturbed_image
 
-
-def pgd_attack(model, images, labels, epsilon, alpha=0.01, iters=40):
-    """Iterative FGSM / Projected Gradient Descent (PGD)"""
+def pgd_attack(model, images, labels, epsilon, alpha, iters):
     original_images = images.clone().detach()
-    adv_images = images.clone().detach()
-    
+    perturbed_images = images.clone().detach()
+    perturbed_images.requires_grad = True
+
     for _ in range(iters):
-        adv_images.requires_grad = True
-        outputs = model(adv_images)
-        loss = nn.CrossEntropyLoss()(outputs, labels)
+        outputs = model(perturbed_images)
+        loss = F.nll_loss(outputs, labels)
         
         model.zero_grad()
         loss.backward()
         
-        # Step in direction of gradient sign
-        adv_images = adv_images.detach() + alpha * adv_images.grad.sign()
-        
-        # Project back into epsilon ball and clip to valid image dynamic range [0, 1]
+        adv_images = perturbed_images + alpha * perturbed_images.grad.sign()
         eta = torch.clamp(adv_images - original_images, min=-epsilon, max=epsilon)
-        adv_images = torch.clamp(original_images + eta, min=0, max=1)
-        
-    return adv_images.detach()
+        perturbed_images = torch.clamp(original_images + eta, min=-3.0, max=3.0).detach() # rough norm bounds
+        perturbed_images.requires_grad = True
 
+    return perturbed_images
 
-def momentum_ifgsm_attack(model, images, labels, epsilon, alpha=0.01, iters=40, decay=1.0):
-    """Momentum Iterative FGSM (MI-FGSM)"""
+def mifgsm_attack(model, images, labels, epsilon, alpha, iters, decay=1.0):
     original_images = images.clone().detach()
-    adv_images = images.clone().detach()
-    momentum = torch.zeros_like(images)
-    
+    perturbed_images = images.clone().detach()
+    perturbed_images.requires_grad = True
+    momentum = torch.zeros_like(images).detach()
+
     for _ in range(iters):
-        adv_images.requires_grad = True
-        outputs = model(adv_images)
-        loss = nn.CrossEntropyLoss()(outputs, labels)
+        outputs = model(perturbed_images)
+        loss = F.nll_loss(outputs, labels)
         
         model.zero_grad()
         loss.backward()
         
-        # Calculate L1 normalized gradient
-        grad = adv_images.grad
-        grad_flat = grad.view(grad.shape[0], -1)
-        l1_norm = torch.norm(grad_flat, p=1, dim=1).view(-1, 1, 1, 1) + 1e-10
-        normalized_grad = grad / l1_norm
+        # Update momentum
+        grad = perturbed_images.grad
+        grad_norm = torch.norm(grad, p=1, dim=, keepdim=True)
+        grad = grad / (grad_norm + 1e-8)
+        momentum = decay * momentum + grad
         
-        # Update momentum vector
-        momentum = decay * momentum + normalized_grad
-        
-        # Update adversarial image
-        adv_images = adv_images.detach() + alpha * momentum.sign()
-        
-        # Project back into epsilon ball and clip to valid image range [0, 1]
+        adv_images = perturbed_images + alpha * momentum.sign()
         eta = torch.clamp(adv_images - original_images, min=-epsilon, max=epsilon)
-        adv_images = torch.clamp(original_images + eta, min=0, max=1)
-        
-    return adv_images.detach()
+        perturbed_images = torch.clamp(original_images + eta, min=-3.0, max=3.0).detach()
+        perturbed_images.requires_grad = True
+
+    return perturbed_images
